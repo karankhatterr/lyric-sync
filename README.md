@@ -42,6 +42,38 @@ The ESP32 sketch only needs: WiFi connect → HTTP GET every ~1s → draw `line`
 
 Find your Mac's IP: `ipconfig getifaddr en0`
 
+## Album cover spinner
+
+When a song has no synced lyrics (or during the intro before the first line),
+the display shows the album cover as spinning pixel art instead. Needs Pillow:
+
+```bash
+pip3 install pillow --break-system-packages
+```
+
+Without Pillow (or when no cover is available) it falls back to plain text.
+The cover URL is also exposed as `art_url` in the `/now` JSON for a future
+color-display ESP32. Cover sources: Spotify app, mic/Shazam, and the Web API
+all provide art; Apple Music's AppleScript does not (text fallback).
+
+## esp display mode (0.96" OLED preview)
+
+```bash
+python3 main.py --display esp
+```
+
+Simulates TWO 128x64 SSD1306 OLEDs side by side, pixel-exact, previewed in
+the terminal with braille pixels (needs a ~135-column-wide terminal window):
+
+- screen 0 (left):  spinning album disc, 1-bit dithered
+- screen 1 (right): lyrics — header, wrapped current line, next-line preview
+
+Works with any `--source`. With `--serve`, the server exposes the raw
+1024-byte framebuffers: `GET /frame/0` (cover) and `GET /frame/1` (lyrics),
+ready for the ESP32 to `display.drawBitmap(0, 0, buf, 128, 64, WHITE)` with
+zero image code on-device — one ESP32 can drive both screens (two I2C
+addresses: 0x3C and 0x3D).
+
 ## Apple Music
 
 Same precise sync as the Spotify app source — the macOS Music app has the

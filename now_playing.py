@@ -18,6 +18,7 @@ class NowPlaying:
     duration: float   # seconds
     position: float   # seconds
     playing: bool
+    art_url: str = ""  # album cover URL, "" if unknown
 
     @property
     def track_id(self):
@@ -61,10 +62,11 @@ class AppleScriptSource:
         guard = (f'if application "{app}" is running then '
                  f'tell application "{app}" to ')
         self._cmd_state = guard + "get player state"
+        art = ' & "|~|" & artwork url of current track' if app == "Spotify" else ""
         self._cmd_meta = (guard + 'name of current track & "|~|" & '
                           'artist of current track & "|~|" & '
                           'album of current track & "|~|" & '
-                          'duration of current track')
+                          'duration of current track' + art)
         self._cmd_pos = guard + "get player position"
 
     def poll(self):
@@ -92,6 +94,7 @@ class AppleScriptSource:
             duration=_num(meta[3]) / self._dur_scale,
             position=_num(position),
             playing=(state == "playing"),
+            art_url=meta[4].strip() if len(meta) > 4 else "",
         )
 
 
@@ -221,6 +224,7 @@ class SpotifyApiSource:
             duration=item["duration_ms"] / 1000.0,
             position=(data.get("progress_ms") or 0) / 1000.0,
             playing=bool(data.get("is_playing")),
+            art_url=(item["album"].get("images") or [{}])[0].get("url", ""),
         )
 
 

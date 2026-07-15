@@ -15,6 +15,7 @@ import json
 import threading
 import time
 
+import cover_art
 from lyrics import fetch_synced_lyrics
 from now_playing import make_source
 
@@ -33,6 +34,7 @@ class SyncEngine:
         self.position = 0.0
         self.last_tick = time.monotonic()
         self.last_nudge = 0.0
+        self.art_url = ""
         self.lock = threading.Lock()
 
     def poll(self):
@@ -50,6 +52,9 @@ class SyncEngine:
                     np.title, np.artist, np.album, np.duration)
                 self.times = [t for t, _ in self.lyrics] if self.lyrics else []
                 self.position = np.position
+                # Cover art: use the source's URL, else free iTunes lookup
+                self.art_url = (np.art_url
+                                or cover_art.itunes_lookup(np.title, np.artist))
             elif abs(np.position - self._estimate(now)) > RESYNC_THRESHOLD:
                 self.position = np.position  # user seeked, or drift
             else:
@@ -93,6 +98,7 @@ class SyncEngine:
                 "index": idx,
                 "line": line,
                 "next_line": next_line,
+                "art_url": self.art_url or self.track.art_url,
             }
 
     def window(self, before=2, after=3):
@@ -113,6 +119,46 @@ class SyncEngine:
 BOLD, DIM, RESET, CLEAR = "\x1b[1;96m", "\x1b[2m", "\x1b[0m", "\x1b[2J\x1b[H"
 
 
+def render_esp(engine):
+    """esp display mode: 128x64 OLED cover preview on the left,
+    the normal live lyrics view on the right."""
+    snap, rows = engine.window()
+    out = [CLEAR]
+    if snap["state"] == "idle":
+        out.append("  (idle — esp mode shows the screens when music plays)\n")
+        print("".join(out), end="", flush=True)
+        return
+    if not cover_art.available():
+        out.append("  (esp mode needs Pillow: pip3 install pillow)\n")
+        print("".join(out), end="", flush=True)
+        return
+    cover_img = cover_art.oled_image(snap.get("art_url")) or cover_art.blank_oled()
+    left = cover_art.braille_lines(cover_img)
+
+    # right column: exactly the normal terminal lyrics view
+    mins, secs = divmod(int(snap["position"]), 60)
+    right = [f"{snap['title']} — {snap['artist']}   "
+             f"[{mins}:{secs:02d}] {snap['state']}", ""]
+    if not snap["has_lyrics"]:
+        right.append(f"{DIM}(no synced lyrics found on LRCLIB){RESET}")
+    else:
+        for is_current, text in rows:
+            text = text or "♪"
+            if is_current:
+                right.append(f"{BOLD}▶ {text}{RESET}")
+            else:
+                right.append(f"{DIM}  {text}{RESET}")
+    # vertically center the lyrics block next to the 16-row disc
+    pad_top = max(0, (len(left) - len(right)) // 2)
+    right = [""] * pad_top + right
+    right += [""] * (len(left) - len(right))
+
+    out.append(f"  {DIM}screen 0: cover (128x64){RESET}\n")
+    for l, r in zip(left, right):
+        out.append(f" {l}  {DIM}|{RESET}  {r}\n")
+    print("".join(out), end="", flush=True)
+
+
 def render(engine):
     snap, rows = engine.window()
     out = [CLEAR]
@@ -128,7 +174,15 @@ def render(engine):
         mins, secs = divmod(int(snap["position"]), 60)
         out.append(f"  {snap['title']} — {snap['artist']}   "
                    f"[{mins}:{secs:02d}] {snap['state']}\n\n")
-        if not snap["has_lyrics"]:
+        # Spinning pixelated cover when there are no lyrics to show
+        # (song has no synced lyrics, or we're in the intro before line 1)
+        show_art = (not snap["has_lyrics"]) or snap.get("index", -1) < 0
+        art = cover_art.spinner_frame(snap.get("art_url")) if show_art else None
+        if art:
+            out.append("\n" + art)
+            if not snap["has_lyrics"]:
+                out.append(f"\n  {DIM}(no synced lyrics found on LRCLIB){RESET}\n")
+        elif not snap["has_lyrics"]:
             out.append(f"  {DIM}(no synced lyrics found on LRCLIB){RESET}\n")
         else:
             for is_current, text in rows:
@@ -147,6 +201,29 @@ def start_server(engine, port):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            p = self.path.rstrip("/")
+            if p in ("/frame", "/frame/0", "/frame/1"):
+                # raw 1024-byte 128x64 1-bit framebuffers for the ESP32:
+                # /frame or /frame/0 = cover disc, /frame/1 = lyrics screen
+                snap = engine.snapshot()
+                if p == "/frame/1":
+                    img = cover_art.oled_lyrics_image(
+                        snap.get("title", ""), snap.get("artist", ""),
+                        snap.get("line", ""), snap.get("next_line", ""),
+                        has_lyrics=snap.get("has_lyrics", False))
+                    buf = img.tobytes() if img else None
+                else:
+                    buf = cover_art.oled_packed(snap.get("art_url"))
+                if buf is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(buf)))
+                self.end_headers()
+                self.wfile.write(buf)
+                return
             if self.path.rstrip("/") in ("", "/now", "/api/now"):
                 body = json.dumps(engine.snapshot()).encode()
                 self.send_response(200)
@@ -177,6 +254,8 @@ def main():
                     help="expose JSON at /now for microcontrollers")
     ap.add_argument("--fps", type=float, default=5.0,
                     help="display refresh rate (default 5)")
+    ap.add_argument("--display", choices=["normal", "esp"], default="normal",
+                    help="esp = 128x64 OLED preview, spinning cover only")
     args = ap.parse_args()
 
     engine = SyncEngine(make_source(args.source))
@@ -192,9 +271,10 @@ def main():
 
     threading.Thread(target=poller, daemon=True).start()
 
+    draw = render_esp if args.display == "esp" else render
     try:
         while True:
-            render(engine)
+            draw(engine)
             time.sleep(1.0 / args.fps)
     except KeyboardInterrupt:
         print(RESET + "\nbye")

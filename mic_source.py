@@ -112,6 +112,7 @@ class MicSource:
             "title": track.get("title", ""),
             "artist": track.get("subtitle", ""),
             "album": album,
+            "art": (track.get("images") or {}).get("coverart", ""),
             "offset": float(offset),
             "t0": t0,
         }
@@ -199,4 +200,5 @@ class MicSource:
             duration=0.0,  # Shazam doesn't give duration; LRCLIB search copes
             position=cur["offset"] + (time.monotonic() - cur["t0"]),
             playing=True,
+            art_url=cur.get("art", ""),
         )
